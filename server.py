@@ -82,6 +82,11 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+# Azure OpenAI configuration
+AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+
 # Get preferred provider (default to openai)
 PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
 
@@ -198,6 +203,10 @@ class MessagesRequest(BaseModel):
         clean_v = v
         if clean_v.startswith('anthropic/'):
             clean_v = clean_v[10:]
+        elif clean_v.startswith('azure_openai/'):
+            clean_v = clean_v[13:]
+        elif clean_v.startswith('azure/'):
+            clean_v = clean_v[6:]
         elif clean_v.startswith('openai/'):
             clean_v = clean_v[7:]
         elif clean_v.startswith('gemini/'):
@@ -228,8 +237,12 @@ class MessagesRequest(BaseModel):
             if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
                 new_model = f"gemini/{clean_v}"
                 mapped = True # Technically mapped to add prefix
-            elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
-                new_model = f"openai/{clean_v}"
+            elif clean_v in OPENAI_MODELS and not v.startswith(('openai/', 'azure/', 'azure_openai/')):
+                # Check if Azure OpenAI is configured and prefer it
+                if AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
+                    new_model = f"azure/{clean_v}"
+                else:
+                    new_model = f"openai/{clean_v}"
                 mapped = True # Technically mapped to add prefix
         # --- Mapping Logic --- END ---
 
@@ -237,7 +250,7 @@ class MessagesRequest(BaseModel):
             logger.debug(f"📌 MODEL MAPPING: '{original_model}' ➡️ '{new_model}'")
         else:
              # If no mapping occurred and no prefix exists, log warning or decide default
-             if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
+             if not v.startswith(('openai/', 'gemini/', 'anthropic/', 'azure/', 'azure_openai/')):
                  logger.warning(f"⚠️ No prefix or mapping rule for model: '{original_model}'. Using as is.")
              new_model = v # Ensure we return the original if no rule applied
 
@@ -271,6 +284,10 @@ class TokenCountRequest(BaseModel):
         clean_v = v
         if clean_v.startswith('anthropic/'):
             clean_v = clean_v[10:]
+        elif clean_v.startswith('azure_openai/'):
+            clean_v = clean_v[13:]
+        elif clean_v.startswith('azure/'):
+            clean_v = clean_v[6:]
         elif clean_v.startswith('openai/'):
             clean_v = clean_v[7:]
         elif clean_v.startswith('gemini/'):
@@ -301,15 +318,19 @@ class TokenCountRequest(BaseModel):
             if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
                 new_model = f"gemini/{clean_v}"
                 mapped = True # Technically mapped to add prefix
-            elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
-                new_model = f"openai/{clean_v}"
+            elif clean_v in OPENAI_MODELS and not v.startswith(('openai/', 'azure/', 'azure_openai/')):
+                # Check if Azure OpenAI is configured and prefer it
+                if AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
+                    new_model = f"azure/{clean_v}"
+                else:
+                    new_model = f"openai/{clean_v}"
                 mapped = True # Technically mapped to add prefix
         # --- Mapping Logic --- END ---
 
         if mapped:
             logger.debug(f"📌 TOKEN COUNT MAPPING: '{original_model}' ➡️ '{new_model}'")
         else:
-             if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
+             if not v.startswith(('openai/', 'gemini/', 'anthropic/', 'azure/', 'azure_openai/')):
                  logger.warning(f"⚠️ No prefix or mapping rule for token count model: '{original_model}'. Using as is.")
              new_model = v # Ensure we return the original if no rule applied
 
@@ -533,9 +554,12 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     
     # Cap max_tokens for OpenAI models to their limit of 16384
     max_tokens = anthropic_request.max_tokens
-    if anthropic_request.model.startswith("openai/") or anthropic_request.model.startswith("gemini/"):
+    if (anthropic_request.model.startswith("openai/") or 
+        anthropic_request.model.startswith("azure/") or 
+        anthropic_request.model.startswith("azure_openai/") or 
+        anthropic_request.model.startswith("gemini/")):
         max_tokens = min(max_tokens, 16384)
-        logger.debug(f"Capping max_tokens to 16384 for OpenAI/Gemini model (original value: {anthropic_request.max_tokens})")
+        logger.debug(f"Capping max_tokens to 16384 for OpenAI/Azure/Gemini model (original value: {anthropic_request.max_tokens})")
     
     # Create LiteLLM request dict
     litellm_request = {
@@ -1104,7 +1128,12 @@ async def create_message(
         litellm_request = convert_anthropic_to_litellm(request)
         
         # Determine which API key to use based on the model
-        if request.model.startswith("openai/"):
+        if request.model.startswith("azure/") or request.model.startswith("azure_openai/"):
+            litellm_request["api_key"] = AZURE_OPENAI_API_KEY
+            litellm_request["api_base"] = AZURE_OPENAI_ENDPOINT
+            litellm_request["api_version"] = AZURE_OPENAI_API_VERSION
+            logger.debug(f"Using Azure OpenAI API for model: {request.model}")
+        elif request.model.startswith("openai/"):
             litellm_request["api_key"] = OPENAI_API_KEY
             logger.debug(f"Using OpenAI API key for model: {request.model}")
         elif request.model.startswith("gemini/"):
@@ -1114,9 +1143,9 @@ async def create_message(
             litellm_request["api_key"] = ANTHROPIC_API_KEY
             logger.debug(f"Using Anthropic API key for model: {request.model}")
         
-        # For OpenAI models - modify request format to work with limitations
-        if "openai" in litellm_request["model"] and "messages" in litellm_request:
-            logger.debug(f"Processing OpenAI model request: {litellm_request['model']}")
+        # For OpenAI/Azure models - modify request format to work with limitations
+        if ("openai" in litellm_request["model"] or "azure" in litellm_request["model"]) and "messages" in litellm_request:
+            logger.debug(f"Processing OpenAI/Azure model request: {litellm_request['model']}")
             
             # For OpenAI models, we need to convert content blocks to simple strings
             # and handle other requirements
